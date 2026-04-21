@@ -56,6 +56,7 @@ class WebshareProxyManager:
     def __init__(self, api_key: str):
         self.api_key = api_key
         self.proxies: List[Dict] = []
+        self.working_proxies: List[Dict] = []
         self.last_fetch = 0
         self.cache_duration = 300  # Refresh proxy list every 5 minutes
         
@@ -72,7 +73,7 @@ class WebshareProxyManager:
         params = {
             "mode": "direct",
             "page": 1,
-            "page_size": 25
+            "page_size": 100
         }
         
         try:
@@ -96,11 +97,46 @@ class WebshareProxyManager:
             return self.proxies  # Return cached if available
     
     def get_random_proxy(self) -> Optional[Dict]:
-        """Get a random proxy from the pool"""
+        """Get a random working proxy from the pool"""
+        if not self.working_proxies:
+            self.test_proxies()
+        if self.working_proxies:
+            return random.choice(self.working_proxies)
+        # Fallback to any proxy if none tested working
         proxies = self.fetch_proxies()
-        if not proxies:
-            return None
-        return random.choice(proxies)
+        if proxies:
+            return random.choice(proxies)
+        return None
+    
+    def test_proxies(self):
+        """Test all proxies and keep only working ones"""
+        all_proxies = self.fetch_proxies()
+        if not all_proxies:
+            return
+        
+        test_url = "https://www.reddit.com/r/indieheads/hot.json?limit=1"
+        headers = {"User-Agent": "reddit-music-monitor/1.0"}
+        working = []
+        
+        logger.info(f"Testing {len(all_proxies)} proxies...")
+        for proxy in all_proxies[:30]:  # Test first 30 to save time
+            proxy_dict = self.get_proxy_dict(proxy)
+            try:
+                resp = requests.get(test_url, headers=headers, proxies=proxy_dict, timeout=8)
+                if resp.status_code == 200:
+                    working.append(proxy)
+            except:
+                pass
+        
+        self.working_proxies = working
+        logger.info(f"Found {len(working)} working proxies")
+    
+    def mark_failed(self, proxy: Dict):
+        """Remove proxy from working list"""
+        addr = proxy.get('proxy_address')
+        port = proxy.get('port')
+        self.working_proxies = [p for p in self.working_proxies 
+                                if not (p.get('proxy_address') == addr and p.get('port') == port)]
     
     def get_proxy_dict(self, proxy: Dict) -> Dict:
         """Convert proxy to requests-compatible dict"""
@@ -184,7 +220,7 @@ class RedditMonitor:
         conn.close()
         logger.info("Database initialized")
     
-    def make_request(self, url: str, max_retries: int = 3) -> Optional[Dict]:
+    def make_request(self, url: str, max_retries: int = 5) -> Optional[Dict]:
         """Make HTTP request with proxy rotation and retry logic"""
         headers = {
             "User-Agent": random.choice(USER_AGENTS),
@@ -217,7 +253,8 @@ class RedditMonitor:
                     logger.warning(f"Rate limited (429), retrying... (attempt {attempt + 1})")
                     time.sleep(random.uniform(2, 5))
                 elif response.status_code == 403:
-                    logger.warning(f"Blocked (403), trying different proxy... (attempt {attempt + 1})")
+                    logger.warning(f"Blocked (403), trying different proxy... (attempt {attempt + 1})"); self.proxy_manager.mark_failed(proxy)
+                    self.proxy_manager.mark_proxy_failed(proxy)
                     time.sleep(random.uniform(1, 3))
                 else:
                     logger.warning(f"HTTP {response.status_code}, retrying...")
