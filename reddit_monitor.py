@@ -125,7 +125,7 @@ class WebshareProxyManager:
                 resp = requests.get(test_url, headers=headers, proxies=proxy_dict, timeout=8)
                 if resp.status_code == 200:
                     working.append(proxy)
-            except:
+            except Exception:
                 pass
         
         self.working_proxies = working
@@ -253,8 +253,8 @@ class RedditMonitor:
                     logger.warning(f"Rate limited (429), retrying... (attempt {attempt + 1})")
                     time.sleep(random.uniform(2, 5))
                 elif response.status_code == 403:
-                    logger.warning(f"Blocked (403), trying different proxy... (attempt {attempt + 1})"); self.proxy_manager.mark_failed(proxy)
-                    self.proxy_manager.mark_proxy_failed(proxy)
+                    logger.warning(f"Blocked (403), trying different proxy... (attempt {attempt + 1})")
+                    self.proxy_manager.mark_failed(proxy)
                     time.sleep(random.uniform(1, 3))
                 else:
                     logger.warning(f"HTTP {response.status_code}, retrying...")
