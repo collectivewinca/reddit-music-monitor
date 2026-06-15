@@ -3,13 +3,25 @@ import html as html_mod
 import json
 import sqlite3
 
-conn = sqlite3.connect("/root/projects/reddit-music-monitor/reddit_monitor.db")
+DB_PATH = "/root/projects/reddit-music-monitor/reddit_monitor.db"
+OUT_PATH = "/root/projects/reddit-music-monitor/index.html"
+
+conn = sqlite3.connect(DB_PATH)
 cursor = conn.cursor()
 
-cursor.execute("SELECT title, subreddit, author, score, url, matched_keywords, discovered_at FROM posts ORDER BY discovered_at DESC LIMIT 50")
+cursor.execute(
+    "SELECT title, subreddit, author, score, url, matched_keywords, discovered_at "
+    "FROM posts ORDER BY discovered_at DESC LIMIT 50"
+)
 posts = cursor.fetchall()
 
-html = """<!DOCTYPE html>
+total_posts = cursor.execute("SELECT COUNT(*) FROM posts").fetchone()[0]
+total_subs = cursor.execute("SELECT COUNT(DISTINCT subreddit) FROM posts").fetchone()[0]
+last_24h = cursor.execute(
+    "SELECT COUNT(*) FROM posts WHERE discovered_at >= datetime('now', '-1 day')"
+).fetchone()[0]
+
+head = """<!DOCTYPE html>
 <html><head><meta charset="UTF-8">
 <title>Reddit Music Monitor</title>
 <style>
@@ -25,11 +37,13 @@ h1{font-size:1.8rem}h2{font-size:1.2rem;margin-top:2rem;border-bottom:1px solid 
 a{color:#0066cc;text-decoration:none}
 </style></head><body>
 <h1>Reddit Music Monitor</h1>
-<p>Indie artists from Sweden, Copenhagen, Morocco, Mexico & more</p>
-<div class="stats">
-<div class="stat"><div class="num">566</div><div>Total Posts</div></div>
-<div class="stat"><div class="num">79</div><div>Subreddits</div></div>
-<div class="stat"><div class="num">50</div><div>Last 24h</div></div>
+<p>Indie artists from Sweden, Copenhagen, Morocco, Mexico &amp; more</p>
+"""
+
+html = head + f"""<div class="stats">
+<div class="stat"><div class="num">{total_posts}</div><div>Total Posts</div></div>
+<div class="stat"><div class="num">{total_subs}</div><div>Subreddits</div></div>
+<div class="stat"><div class="num">{last_24h}</div><div>Last 24h</div></div>
 </div>
 <h2>Recent Posts</h2>
 """
@@ -50,7 +64,8 @@ for post in posts:
 
 html += "</body></html>"
 
-with open("/root/projects/reddit-music-monitor/index.html", "w") as f:
+with open(OUT_PATH, "w") as f:
     f.write(html)
 
-print("Wrote index.html")
+conn.close()
+print(f"Wrote index.html (total={total_posts}, subs={total_subs}, last24h={last_24h})")
