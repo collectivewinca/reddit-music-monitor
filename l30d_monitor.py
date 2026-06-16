@@ -36,6 +36,7 @@ BATCH_SIZE = 6           # subreddits per last30days RSS call
 RSS_DEPTH = "default"    # 'deep' fires too many feed URLs per sub at scale
 INTER_BATCH_SLEEP = 5    # seconds between RSS batches
 PROBE_TIMEOUT = 45       # seconds; the probe must stay cheap (see probe_tier)
+CANARY_MIN_RATE = 0.05   # warn if keyword-match rate falls below this on a healthy tier
 # Body-tier guard: the keyless RSS layer is multi-tier; under Reddit rate-limiting
 # it degrades to a TITLE-ONLY tier (empty selftext), which halves the keyword
 # gate's recall. We cheaply probe ONE busy text-heavy sub first; if the tier looks
@@ -345,6 +346,30 @@ def probe_tier() -> str:
     return "ok" if rich else "thin"
 
 
+def emit_canary(fetched: int, matched: int, new: int) -> bool:
+    """Capture-rate canary. The tier probe says retrieval was healthy, so a near-zero
+    keyword-match rate now points at a DIFFERENT problem (gate too strict, or the
+    sweep subs served thin tier even though the probe sub didn't). Emit grep-able
+    'CANARY' WARNING markers a future notifier (Telegram, etc.) can alert on.
+
+    Returns True if the run is healthy enough to (re)publish the dashboard — we do
+    NOT rebuild on a zero-match run, so a bad run can't present stale data as fresh.
+    """
+    if fetched == 0:
+        logger.warning("CANARY empty-fetch: 0 posts fetched on an 'ok' tier")
+        return False
+    rate = matched / fetched
+    if matched == 0:
+        logger.warning(f"CANARY zero-match: {fetched} fetched, 0 matched — gate too strict "
+                       f"or thin sweep; dashboard NOT rebuilt")
+        return False
+    if rate < CANARY_MIN_RATE:
+        logger.warning(f"CANARY low-capture: {matched}/{fetched} matched ({rate:.0%}), "
+                       f"below {CANARY_MIN_RATE:.0%} — investigate")
+    logger.info(f"capture {matched}/{fetched} ({rate:.0%}), {new} new inserted")
+    return True
+
+
 def main() -> int:
     lock = acquire_lock()
     if lock is None:
@@ -385,8 +410,8 @@ def main() -> int:
     conn = get_conn()
     new = store_posts(conn, gated)
     conn.close()
-    logger.info(f"{len(gated)} keyword-matched, {new} new inserted")
-    run_dashboard()
+    if emit_canary(len(raw), len(gated), new):
+        run_dashboard()
     return 0
 
 
