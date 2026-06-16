@@ -16,3 +16,6 @@ index.html
 
 # single-instance lock (runtime state)
 .monitor.lock
+
+# Telegram alert chat id (local config; not a secret but env-specific)
+.telegram_chat
