@@ -20,17 +20,23 @@ cd "$(dirname "$0")"
 DIR="$(pwd -P)"
 LOG="$DIR/cron.log"
 PY=/opt/homebrew/bin/python3
-TG=/Users/aletviegas/bin/telegram-via-ops          # @discoopsbot sender
-CHAT_FILE="$DIR/.telegram_chat"                     # absent/empty => alerts disabled
+QUO_KEY_FILE="$HOME/.quo/credentials"               # raw Quo API key (NO 'Bearer' prefix)
+QUO_FROM="+14159367377"                             # Quo "Primary" number (sender)
+ALERT_TO_FILE="$HOME/.quo/alert_to"                 # destination cell, E.164; absent => alerts disabled
 MAX_LOG=$((50 * 1024 * 1024))                       # 50MB rotate threshold
 
 ts() { date "+%Y-%m-%d %H:%M:%S"; }
 
-notify() {  # $1 = message; never fail the run on a notify error
-  [[ -r "$CHAT_FILE" ]] || return 0
-  local cid; cid="$(tr -d '[:space:]' < "$CHAT_FILE")"
-  [[ -n "$cid" ]] || return 0
-  "$TG" "$cid" -m "$1" >/dev/null 2>&1 || echo "$(ts) - WARN - telegram notify failed" >> "$LOG"
+notify() {  # $1 = message; SMS via Quo (api.quo.com). Never fail the run on a notify error.
+  [[ -r "$QUO_KEY_FILE" && -r "$ALERT_TO_FILE" ]] || return 0
+  local key to body
+  key="$(tr -d '[:space:]' < "$QUO_KEY_FILE")"
+  to="$(tr -d '[:space:]' < "$ALERT_TO_FILE")"
+  [[ -n "$key" && -n "$to" ]] || return 0
+  body="$("$PY" -c 'import json,sys; print(json.dumps({"content":sys.argv[1],"from":sys.argv[2],"to":[sys.argv[3]]}))' "$1" "$QUO_FROM" "$to")"
+  /usr/bin/curl -sS --max-time 15 -X POST "https://api.quo.com/v1/messages" \
+    -H "Authorization: ${key}" -H "Content-Type: application/json" --data "$body" \
+    >/dev/null 2>&1 || echo "$(ts) - WARN - quo SMS notify failed" >> "$LOG"
 }
 
 # --- Watchdog 1: retired webshare-proxy zombie resurrected? ---
