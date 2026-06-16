@@ -2,7 +2,7 @@
 
 A Python-based Reddit monitoring system that tracks indie artists and music-related posts across 175 subreddits. Designed to discover emerging musicians from Sweden, Copenhagen, Morocco, Mexico, India, Hungary, Austria, Norway, South America, Japan, and Southeast Asia.
 
-**Live Dashboard:** https://hearty-garnet-eq9j.here.now/  
+**Live Dashboard:** https://olive-monsoon-n9ct.here.now/  
 **GitHub Repo:** https://github.com/collectivewinca/reddit-music-monitor
 
 ---
@@ -248,7 +248,7 @@ From: alet@velab.org
 To: alet@velab.org
 Subject: Reddit Music Monitor - Daily Summary
 
-Dashboard: https://hearty-garnet-eq9j.here.now/
+Dashboard: https://olive-monsoon-n9ct.here.now/
 ...
 EOF
 ```

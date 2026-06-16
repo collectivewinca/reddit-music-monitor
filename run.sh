@@ -58,3 +58,20 @@ printf '%s\n' "$OUT" >> "$LOG"
 if line=$(grep -m1 -E "CANARY (zero-match|empty-fetch)" <<<"$OUT"); then
   notify "🔴 reddit-music-monitor: ${line#*WARNING - }"
 fi
+
+# --- Comment-intelligence: mine artist recommendations from thread comments ---
+# Best-effort (needs Chrome running with CDP for opencli's reddit read); never blocks.
+"$PY" mine_comments.py >> "$LOG" 2>&1 || echo "$(ts) - WARN - mine_comments failed" >> "$LOG"
+
+# --- Render the MINY A&R Radar dashboard (now includes mined artists) ---
+"$PY" gen_dashboard.py >> "$LOG" 2>&1 || echo "$(ts) - WARN - dashboard render failed" >> "$LOG"
+
+# --- Publish the dashboard to a stable here.now slug (updates in place) ---
+SLUG=olive-monsoon-n9ct
+STAGE="$(mktemp -d)/d" && mkdir -p "$STAGE" && cp "$DIR/index.html" "$STAGE/index.html"
+if ( cd "$STAGE" && bash "$HOME/.claude/skills/here-now/scripts/publish.sh" . --slug "$SLUG" --client claude-code ) >> "$LOG" 2>&1; then
+  echo "$(ts) - INFO - published -> https://$SLUG.here.now/" >> "$LOG"
+else
+  echo "$(ts) - WARN - here.now publish failed" >> "$LOG"
+fi
+rm -rf "$STAGE"

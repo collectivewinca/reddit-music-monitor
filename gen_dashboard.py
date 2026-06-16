@@ -1,75 +1,246 @@
 #!/usr/bin/env python3
-import html as html_mod
+"""Render the MINY A&R Radar dashboard (index.html) from reddit_monitor.db.
+
+Surfaces two things a MINY scout actually wants: the emerging artists the Reddit
+community keeps recommending (from comment_artists, mined by mine_comments.py),
+and the releases/threads worth a listen (high-relevance posts). Modern minimalist
+UI; the signature is a per-artist "signal-bar" glyph scaled to mention count.
+"""
+import html as H
 import json
-from pathlib import Path
 import sqlite3
+from datetime import datetime, timezone
+from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 DB_PATH = SCRIPT_DIR / "reddit_monitor.db"
 OUT_PATH = SCRIPT_DIR / "index.html"
 
 conn = sqlite3.connect(DB_PATH)
-cursor = conn.cursor()
+conn.row_factory = sqlite3.Row
+cur = conn.cursor()
 
-cursor.execute(
-    "SELECT title, subreddit, author, score, url, matched_keywords, discovered_at, "
-    "COALESCE(relevance_score, 0) AS rel FROM posts ORDER BY rel DESC, discovered_at DESC LIMIT 50"
+
+def _table_exists(name: str) -> bool:
+    return cur.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
+    ).fetchone() is not None
+
+
+# ---- stats ----------------------------------------------------------------
+total_posts = cur.execute("SELECT COUNT(*) FROM posts").fetchone()[0]
+total_subs = cur.execute("SELECT COUNT(DISTINCT subreddit) FROM posts").fetchone()[0]
+artist_count = (
+    cur.execute("SELECT COUNT(*) FROM comment_artists").fetchone()[0]
+    if _table_exists("comment_artists") else 0
 )
-posts = cursor.fetchall()
 
-total_posts = cursor.execute("SELECT COUNT(*) FROM posts").fetchone()[0]
-total_subs = cursor.execute("SELECT COUNT(DISTINCT subreddit) FROM posts").fetchone()[0]
-last_24h = cursor.execute(
-    "SELECT COUNT(*) FROM posts WHERE discovered_at >= datetime('now', '-1 day')"
-).fetchone()[0]
+# ---- emerging artists (community recommendations) -------------------------
+artists = []
+if _table_exists("comment_artists"):
+    rows = cur.execute(
+        "SELECT name, mentions, sources FROM comment_artists "
+        "ORDER BY mentions DESC, updated_at DESC LIMIT 30"
+    ).fetchall()
+    for r in rows:
+        ids = [s for s in (r["sources"] or "").split(",") if s]
+        subs = []
+        if ids:
+            q = ",".join("?" * len(ids))
+            subs = [
+                x[0] for x in cur.execute(
+                    f"SELECT DISTINCT subreddit FROM posts WHERE reddit_id IN ({q})", ids
+                ).fetchall()
+            ]
+        artists.append({"name": r["name"], "mentions": r["mentions"], "subs": subs[:3]})
 
-head = """<!DOCTYPE html>
-<html><head><meta charset="UTF-8">
-<title>Reddit Music Monitor</title>
-<style>
-body{font-family:sans-serif;max-width:900px;margin:40px auto;padding:0 20px;color:#222}
-h1{font-size:1.8rem}h2{font-size:1.2rem;margin-top:2rem;border-bottom:1px solid #eee;padding-bottom:.3rem}
-.stats{display:flex;gap:40px;margin:20px 0}
-.stat{text-align:center}
-.stat .num{font-size:2rem;font-weight:bold;color:#0066cc}
-.post{margin:12px 0;padding:12px;border:1px solid #eee;border-radius:6px}
-.post-title{font-weight:bold;margin-bottom:4px}
-.post-meta{color:#666;font-size:.85rem}
-.post-kw{color:#0066cc;font-size:.8rem;margin-top:4px}
-a{color:#0066cc;text-decoration:none}
-</style></head><body>
-<h1>Reddit Music Monitor</h1>
-<p>Indie artists from Sweden, Copenhagen, Morocco, Mexico &amp; more</p>
-"""
-
-html = head + f"""<div class="stats">
-<div class="stat"><div class="num">{total_posts}</div><div>Total Posts</div></div>
-<div class="stat"><div class="num">{total_subs}</div><div>Subreddits</div></div>
-<div class="stat"><div class="num">{last_24h}</div><div>Last 24h</div></div>
-</div>
-<h2>Recent Posts</h2>
-"""
-
-for post in posts:
-    title, sub, author, score, url, kw, dt, rel = post
-    kw_str = ", ".join(json.loads(kw)) if kw else ""
-    safe_title = html_mod.escape(str(title))
-    safe_sub = html_mod.escape(str(sub))
-    safe_author = html_mod.escape(str(author))
-    safe_kw = html_mod.escape(kw_str)
-    safe_url = html_mod.escape(str(url)) if str(url).startswith(("http://", "https://")) else "#"
-    html += f'<div class="post"><div class="post-title"><a href="{safe_url}">{safe_title}</a></div>'
-    html += f'<div class="post-meta">r/{safe_sub} | u/{safe_author} | {score} upvotes | {dt}</div>'
-    if safe_kw:
-        html += f'<div class="post-kw">{safe_kw}</div>'
-    if rel > 0:
-        html += f'<div class="post-kw">relevance {int(rel)}</div>'
-    html += "</div>\n"
-
-html += "</body></html>"
-
-with open(OUT_PATH, "w") as f:
-    f.write(html)
+# ---- highlights (releases & threads worth a listen) -----------------------
+highlights = cur.execute(
+    "SELECT title, subreddit, score, url, matched_keywords, "
+    "COALESCE(relevance_score, 0) AS rel FROM posts "
+    "ORDER BY rel DESC, discovered_at DESC LIMIT 12"
+).fetchall()
 
 conn.close()
-print(f"Wrote index.html (total={total_posts}, subs={total_subs}, last24h={last_24h})")
+lead = artists[0] if artists else None
+updated = datetime.now(timezone.utc).strftime("%d %b %Y · %H:%M UTC")
+
+
+# ---- render helpers -------------------------------------------------------
+def signal_bars(mentions: int) -> str:
+    """Equalizer glyph: 5 bars, filled in proportion to cross-thread mentions."""
+    filled = max(1, min(5, mentions))
+    bars = "".join(
+        f'<span class="bar{" on" if i < filled else ""}" style="height:{6 + i * 4}px"></span>'
+        for i in range(5)
+    )
+    return f'<span class="bars" title="{mentions} thread(s)">{bars}</span>'
+
+
+def artist_card(rank: int, a: dict) -> str:
+    name = H.escape(a["name"])
+    subs = " · ".join("r/" + H.escape(s) for s in a["subs"]) or "music threads"
+    q = H.escape(a["name"]).replace(" ", "+")
+    return f"""<a class="card artist" href="https://www.google.com/search?q={q}+band+music" target="_blank" rel="noopener">
+      <span class="rank">{rank:02d}</span>
+      <div class="aname">{name}</div>
+      <div class="ameta">{subs}</div>
+      <div class="arow">{signal_bars(a["mentions"])}<span class="mcount">{a["mentions"]}×</span></div>
+    </a>"""
+
+
+def highlight_card(p) -> str:
+    title = H.escape(p["title"] or "")
+    sub = H.escape(p["subreddit"] or "")
+    url = p["url"] or "#"
+    safe_url = H.escape(url) if url.startswith(("http://", "https://")) else "#"
+    rel = p["rel"] or 0
+    try:
+        kws = ", ".join(json.loads(p["matched_keywords"]) or [])
+    except Exception:
+        kws = ""
+    kw_html = f'<div class="tags">{H.escape(kws[:80])}</div>' if kws else ""
+    rel_html = f'<span class="rel">{rel:.0f}</span>' if rel else ""
+    return f"""<a class="card hl" href="{safe_url}" target="_blank" rel="noopener">
+      <div class="hl-title">{title}</div>
+      <div class="hl-meta"><span class="sub">r/{sub}</span><span class="dot">·</span><span>{p["score"]} upvotes</span>{rel_html}</div>
+      {kw_html}
+    </a>"""
+
+
+hero = ""
+if lead:
+    subline = f' · {" · ".join("r/" + H.escape(s) for s in lead["subs"])}' if lead["subs"] else ""
+    plural = "s" if lead["mentions"] != 1 else ""
+    hero = f"""<section class="hero">
+      <div class="eyebrow">Most recommended right now</div>
+      <h1 class="lead">{H.escape(lead["name"])}</h1>
+      <div class="lead-meta">{signal_bars(lead["mentions"])}<span>surfaced across {lead["mentions"]} thread{plural}{subline}</span></div>
+    </section>"""
+
+artist_html = "".join(artist_card(i + 1, a) for i, a in enumerate(artists)) or \
+    '<div class="empty">No artists mined yet — run mine_comments.py.</div>'
+highlight_html = "".join(highlight_card(p) for p in highlights) or \
+    '<div class="empty">No highlights yet.</div>'
+
+CSS = """
+:root{
+  --paper:#F4F4F6; --ink:#16161A; --accent:#5B4BE8; --lilac:#ECEAFC;
+  --muted:#8A8792; --line:#E6E6EA; --card:#FFFFFF;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--paper);color:var(--ink);
+  font-family:'Inter',system-ui,sans-serif;line-height:1.5;
+  -webkit-font-smoothing:antialiased;padding:0 24px}
+.wrap{max-width:1080px;margin:0 auto;padding:56px 0 80px}
+a{color:inherit;text-decoration:none}
+
+.masthead{display:flex;justify-content:space-between;align-items:baseline;
+  flex-wrap:wrap;gap:12px;padding-bottom:20px;border-bottom:1px solid var(--line)}
+.mark{font-family:'Space Grotesk',sans-serif;font-weight:700;font-size:20px;
+  letter-spacing:-.02em}
+.mark b{color:var(--accent)}
+.tagline{color:var(--muted);font-size:13.5px;max-width:440px;margin-top:6px}
+.stamp{font-family:'Space Mono',monospace;font-size:11.5px;color:var(--muted)}
+
+.hero{padding:54px 0 40px;border-bottom:1px solid var(--line)}
+.eyebrow{font-family:'Space Mono',monospace;font-size:11px;letter-spacing:.18em;
+  text-transform:uppercase;color:var(--accent);margin-bottom:14px}
+.lead{font-family:'Space Grotesk',sans-serif;font-weight:700;
+  font-size:clamp(40px,8vw,76px);letter-spacing:-.035em;line-height:.98}
+.lead-meta{display:flex;align-items:center;gap:12px;margin-top:18px;
+  color:var(--muted);font-size:14px}
+
+.section{margin-top:52px}
+.shead{display:flex;align-items:baseline;gap:12px;margin-bottom:22px;flex-wrap:wrap}
+.shead h2{font-family:'Space Grotesk',sans-serif;font-weight:500;font-size:15px;
+  letter-spacing:.02em}
+.shead .count{font-family:'Space Mono',monospace;font-size:12px;color:var(--muted)}
+.shead .desc{color:var(--muted);font-size:13px;margin-left:auto;text-align:right}
+
+.grid{display:grid;gap:14px}
+.grid.artists{grid-template-columns:repeat(auto-fill,minmax(212px,1fr))}
+.grid.hls{grid-template-columns:repeat(auto-fill,minmax(300px,1fr))}
+
+.card{display:block;background:var(--card);border:1px solid var(--line);
+  border-radius:14px;padding:18px;
+  transition:transform .16s ease,border-color .16s ease,box-shadow .16s ease}
+.card:hover{transform:translateY(-3px);border-color:var(--accent);
+  box-shadow:0 10px 30px -18px rgba(91,75,232,.5)}
+.card:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
+.artist{position:relative;min-height:128px;display:flex;flex-direction:column}
+.rank{font-family:'Space Mono',monospace;font-size:11px;color:var(--muted)}
+.aname{font-family:'Space Grotesk',sans-serif;font-weight:500;font-size:19px;
+  letter-spacing:-.01em;margin-top:6px;line-height:1.15}
+.ameta{color:var(--muted);font-size:12px;margin-top:6px}
+.arow{display:flex;align-items:flex-end;gap:10px;margin-top:auto;padding-top:14px}
+.mcount{font-family:'Space Mono',monospace;font-size:12px;color:var(--accent)}
+
+.bars{display:inline-flex;align-items:flex-end;gap:3px;height:22px}
+.bars .bar{width:3px;border-radius:2px;background:var(--line);display:inline-block}
+.bars .bar.on{background:var(--accent)}
+
+.hl{display:flex;flex-direction:column;gap:9px}
+.hl-title{font-family:'Space Grotesk',sans-serif;font-weight:500;font-size:16px;
+  letter-spacing:-.01em;line-height:1.25}
+.hl-meta{display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--muted)}
+.hl-meta .sub{color:var(--ink);font-weight:500}
+.hl-meta .rel{margin-left:auto;font-family:'Space Mono',monospace;font-size:11px;
+  color:var(--accent);background:var(--lilac);padding:2px 7px;border-radius:20px}
+.tags{font-size:11.5px;color:var(--muted);font-family:'Space Mono',monospace}
+
+.empty{color:var(--muted);font-size:14px;padding:20px 0}
+footer{margin-top:64px;padding-top:20px;border-top:1px solid var(--line);
+  display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;
+  font-family:'Space Mono',monospace;font-size:11.5px;color:var(--muted)}
+
+@media (max-width:560px){.wrap{padding:36px 0 60px}body{padding:0 16px}}
+@media (prefers-reduced-motion:reduce){.card{transition:none}.card:hover{transform:none}}
+"""
+
+html = f"""<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MINY A&amp;R Radar — Reddit music discovery</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500&family=Space+Grotesk:wght@500;700&family=Space+Mono&display=swap" rel="stylesheet">
+<style>{CSS}</style>
+</head><body><div class="wrap">
+
+  <header class="masthead">
+    <div>
+      <div class="mark">MINY <b>A&amp;R Radar</b></div>
+      <div class="tagline">Emerging artists the Reddit music community keeps recommending — discovery leads for MINY, mined from the comments.</div>
+    </div>
+    <div class="stamp">updated {updated}</div>
+  </header>
+
+  {hero}
+
+  <section class="section">
+    <div class="shead">
+      <h2>Emerging artists</h2><span class="count">{artist_count} tracked</span>
+      <span class="desc">Ranked by how many threads recommend them</span>
+    </div>
+    <div class="grid artists">{artist_html}</div>
+  </section>
+
+  <section class="section">
+    <div class="shead">
+      <h2>Signal from the threads</h2><span class="count">{total_posts} posts · {total_subs} subs</span>
+      <span class="desc">New releases &amp; reactions worth a listen</span>
+    </div>
+    <div class="grid hls">{highlight_html}</div>
+  </section>
+
+  <footer>
+    <span>reddit-music-monitor → MINY · last30days RSS + deepseek</span>
+    <span>{updated}</span>
+  </footer>
+
+</div></body></html>"""
+
+OUT_PATH.write_text(html)
+print(f"Wrote {OUT_PATH.name} (artists={len(artists)}, highlights={len(highlights)}, posts={total_posts})")
