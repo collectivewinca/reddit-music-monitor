@@ -31,6 +31,7 @@ _L30_SCRIPTS = Path.home() / ".claude/skills/last30days/skills/last30days/script
 if str(_L30_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_L30_SCRIPTS))
 from lib import reddit_rss  # noqa: E402
+from lib import env as l30_env, providers as l30_prov  # noqa: E402
 
 logging.basicConfig(
     level=logging.INFO,
@@ -162,6 +163,36 @@ def compute_relevance(matched_keywords: list[str], llm_score: float | None) -> f
     return round(llm_score + kw_bonus, 2)
 
 
+def score_with_llm(posts: list[dict]) -> None:
+    """Fill each post's llm_score (0-100) via last30days' deepseek client. Best-effort."""
+    if not posts:
+        return
+    try:
+        cfg = l30_env.get_config()
+        runtime, client = l30_prov.resolve_runtime(cfg, "quick")
+        if client is None:
+            logger.warning("no LLM client available; keeping keyword-only ranking")
+            return
+        lines = [f"{i}. r/{p['subreddit']}: {p['title']}" for i, p in enumerate(posts)]
+        prompt = (
+            "Rate each Reddit post's relevance to discovering NEW or emerging indie "
+            "and underground MUSIC (new releases, emerging artists, bandcamp/soundcloud "
+            "finds) on a 0-100 scale. Return ONLY a JSON object mapping the index (as a "
+            "string) to an integer 0-100. Posts:\n" + "\n".join(lines)
+        )
+        data = client.generate_json(runtime.rerank_model, prompt)
+        if not isinstance(data, dict):
+            return
+        for i, p in enumerate(posts):
+            v = data.get(str(i))
+            try:
+                p["llm_score"] = float(v) if v is not None else None
+            except (TypeError, ValueError):
+                p["llm_score"] = None
+    except Exception as e:
+        logger.warning(f"LLM scoring failed ({e}); continuing with keyword-only ranking")
+
+
 def store_posts(conn: sqlite3.Connection, records: list[dict]) -> int:
     cur = conn.cursor()
     new = 0
@@ -197,14 +228,21 @@ def main() -> int:
     keywords = cfg.get("keywords", [])
 
     raw = fetch_posts(subreddits)
+    # Phase 1 — keyword gate (inclusion only, no ranking)
     gated: list[dict] = []
     for p in raw:
         matched = check_keywords(p["title"], p["body"], keywords)
         if not matched:
             continue  # keyword gate = source of truth for inclusion
         p["matched_keywords"] = matched
-        p["relevance_score"] = compute_relevance(matched, p.get("llm_score"))
         gated.append(p)
+
+    # Phase 2 — LLM scoring (fills llm_score on each post)
+    score_with_llm(gated)
+
+    # Phase 3 — hybrid ranking (keyword density + LLM score)
+    for p in gated:
+        p["relevance_score"] = compute_relevance(p["matched_keywords"], p.get("llm_score"))
 
     conn = get_conn()
     new = store_posts(conn, gated)
