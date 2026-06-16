@@ -9,9 +9,12 @@ Pipeline: last30days fetch -> keyword gate (inclusion) -> compute_relevance
 """
 from __future__ import annotations
 
+import fcntl
 import json
 import logging
+import os
 import re
+import signal
 import sqlite3
 import subprocess
 import sys
@@ -23,6 +26,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 DB_PATH = SCRIPT_DIR / "reddit_monitor.db"
 CONFIG_PATH = SCRIPT_DIR / "config.json"
 CURSOR_PATH = SCRIPT_DIR / ".sub_cursor"
+LOCK_PATH = SCRIPT_DIR / ".monitor.lock"
 TOPIC = "new indie and underground music releases and emerging artists"
 # Reddit throttles ~175 rapid feed pulls from one IP, so each run covers a
 # ROTATING window of the sub list (full sweep ~daily at a 6h cron) and paces
@@ -31,6 +35,13 @@ SUB_WINDOW = 30          # subreddits processed per run (rotates across runs)
 BATCH_SIZE = 6           # subreddits per last30days RSS call
 RSS_DEPTH = "default"    # 'deep' fires too many feed URLs per sub at scale
 INTER_BATCH_SLEEP = 5    # seconds between RSS batches
+PROBE_TIMEOUT = 45       # seconds; the probe must stay cheap (see probe_tier)
+# Body-tier guard: the keyless RSS layer is multi-tier; under Reddit rate-limiting
+# it degrades to a TITLE-ONLY tier (empty selftext), which halves the keyword
+# gate's recall. We cheaply probe ONE busy text-heavy sub first; if the tier looks
+# thin/throttled we skip the whole run rather than collect junk and overwrite the
+# dashboard. PROBE_SUB is text-heavy so the rich tier reliably yields selftext.
+PROBE_SUB = "WeAreTheMusicMakers"
 
 # Call last30days' keyless Reddit retrieval layer DIRECTLY (it handles Reddit
 # rate-limiting via multi-tier RSS/listing fetch). We use its broad discovery
@@ -278,7 +289,76 @@ def _select_window(all_subs: list[str]) -> list[str]:
     return window
 
 
+def acquire_lock():
+    """Single-instance guard: take an exclusive, non-blocking lock so a 6h cron
+    fire never overlaps a manual run (or a previous run that ran long) — two
+    monitors on one residential IP just deepen Reddit throttling. Returns the
+    held file handle (keep it referenced for the process lifetime) or None if
+    another instance holds it."""
+    fh = open(LOCK_PATH, "w")
+    try:
+        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        fh.close()
+        return None
+    fh.write(str(os.getpid()))
+    fh.flush()
+    return fh
+
+
+def probe_tier() -> str:
+    """Classify which retrieval tier Reddit is currently serving, cheaply.
+
+    Returns:
+      'throttled' — zero items came back (rate-limited or down) -> skip the run.
+      'thin'      — items came back but ALL lack selftext AND have score 0,
+                    the signature of the title-only RSS fallback -> skip.
+      'ok'        — at least one item has real body text or a real score -> run.
+
+    One probe call on a text-heavy sub. Link-only subs would false-flag 'thin'
+    (legit link posts have no selftext), so PROBE_SUB is deliberately text-heavy.
+
+    Bounded by PROBE_TIMEOUT: when throttled, reddit_rss retries across tiers with
+    backoff and can hang for minutes — a guard must stay cheap, so a timeout is
+    itself a 'throttled' signal (the IP is clearly not healthy). SIGALRM is fine
+    here: main() runs on the main thread.
+    """
+    def _timeout(signum, frame):
+        raise TimeoutError("probe exceeded PROBE_TIMEOUT")
+    old = signal.signal(signal.SIGALRM, _timeout)
+    signal.alarm(PROBE_TIMEOUT)
+    try:
+        items = reddit_rss.search_rss(TOPIC, depth=RSS_DEPTH, subreddits=[PROBE_SUB]) or []
+    except TimeoutError:
+        logger.warning(f"tier probe timed out after {PROBE_TIMEOUT}s; treating as throttled")
+        return "throttled"
+    except Exception as e:
+        logger.warning(f"tier probe failed ({e}); treating as throttled")
+        return "throttled"
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old)
+    if not items:
+        return "throttled"
+    rich = any((it.get("selftext") or "").strip() or _int(it.get("score")) > 0
+               for it in items)
+    return "ok" if rich else "thin"
+
+
 def main() -> int:
+    lock = acquire_lock()
+    if lock is None:
+        logger.warning("another monitor instance is running; skipping this run")
+        return 0
+    tier = probe_tier()
+    if tier != "ok":
+        # Skip WITHOUT regenerating the dashboard — a thin/throttled run would
+        # only insert junk (or nothing) and a 0-delta rebuild can present stale
+        # data as fresh. Better to no-op and let the next 6h fire try a cool IP.
+        logger.warning(f"retrieval tier '{tier}' (not 'ok'); skipping run to avoid thin data")
+        return 0
+    logger.info("tier probe ok (rich tier available); proceeding")
+
     cfg = load_config()
     all_subs = cfg.get("subreddits", [])
     keywords = cfg.get("keywords", [])
