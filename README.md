@@ -1,6 +1,6 @@
 # Reddit Music Monitor
 
-A Python-based Reddit monitoring system that tracks indie artists and music-related posts across 100+ subreddits using rotating residential proxies from Webshare.io. Designed to discover emerging musicians from Sweden, Copenhagen, Morocco, Mexico, India, Hungary, Austria, Norway, South America, Japan, and Southeast Asia.
+A Python-based Reddit monitoring system that tracks indie artists and music-related posts across 175 subreddits. Designed to discover emerging musicians from Sweden, Copenhagen, Morocco, Mexico, India, Hungary, Austria, Norway, South America, Japan, and Southeast Asia.
 
 **Live Dashboard:** https://hearty-garnet-eq9j.here.now/  
 **GitHub Repo:** https://github.com/collectivewinca/reddit-music-monitor
@@ -19,39 +19,56 @@ This tool continuously monitors Reddit for music-related posts that match specif
 
 ### Key Features
 
-- **Rotating Residential Proxies**: Uses Webshare.io API to fetch and rotate proxies, avoiding Reddit IP blocks
-- **Multi-Region Focus**: Monitors subreddits for 20+ countries/cities
-- **Smart Keyword Matching**: 150+ music-specific keywords (no false positives)
-- **SQLite Storage**: Stores posts with metadata, matched keywords, and raw JSON
-- **Auto-Restart**: Cron job ensures the monitor stays running
-- **Web Dashboard**: Auto-published to here.now for easy browsing
-- **Email Reports**: Daily summaries sent via Himalaya/Proton Mail
+- **Keyless Reddit Retrieval**: Uses last30days' RSS layer (`lib.reddit_rss.search_rss`) — no residential proxies, no API key needed for retrieval
+- **Residential IP Required**: Reddit 403-blocks datacenter IPs, so the monitor runs on a Mac
+- **Multi-Region Focus**: Monitors 175 subreddits across 20+ countries/cities
+- **Smart Keyword Gate**: 214-keyword matcher (`check_keywords`) gates inclusion — no false positives
+- **LLM-Enhanced Ranking**: `compute_relevance` combines keyword density with an optional deepseek-v4-flash LLM relevance score (via Ollama Cloud through last30days)
+- **SQLite Storage**: Stores posts with metadata, matched keywords, raw JSON, and a `relevance_score` column
+- **Web Dashboard**: `gen_dashboard.py` renders `index.html` from the database
+- **Scheduled Runs**: Cron job every 6 hours on a Mac
 
 ---
 
 ## Architecture
 
 ```
-┌─────────────────┐     ┌──────────────────┐     ┌─────────────────┐
-│   Webshare.io   │────▶│  Reddit Monitor    │────▶│   SQLite DB     │
-│  (Proxies API)  │     │  (Python + requests)│     │  (reddit_monitor.db)
-└─────────────────┘     └──────────────────┘     └─────────────────┘
-                               │
-                               ▼
-                        ┌──────────────────┐
-                        │   here.now       │
-                        │  (Web Dashboard) │
-                        └──────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│  last30days (keyless RSS layer)                                  │
+│  lib.reddit_rss.search_rss — multi-tier, rate-limit-aware fetch  │
+│  (no proxies, no API key)                                        │
+└──────────────────────────┬───────────────────────────────────────┘
+                           │  broad per-subreddit set
+                           ▼
+┌──────────────────────────────────────────────────────────────────┐
+│  l30d_monitor.py — keyword gate + relevance ranking              │
+│                                                                  │
+│  1. check_keywords — 214-keyword substring match (inclusion)     │
+│  2. compute_relevance — keyword density + optional LLM score     │
+│     (deepseek-v4-flash via Ollama Cloud through last30days)      │
+└──────────────────────────┬───────────────────────────────────────┘
+                           │  gated, ranked posts
+                           ▼
+┌──────────────────────────────────────────────────────────────────┐
+│  SQLite (reddit_monitor.db)                                      │
+│  posts table with relevance_score REAL column                    │
+└──────────────────────────┬───────────────────────────────────────┘
+                           │
+                           ▼
+┌──────────────────────────────────────────────────────────────────┐
+│  gen_dashboard.py → index.html → here.now (live dashboard)       │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
 ### Components
 
 | File | Purpose |
 |------|---------|
-| `reddit_monitor.py` | Main application (600+ lines) with proxy rotation, Reddit API scraping, SQLite storage |
-| `config.json` | Subreddits (100+) and keywords (150+) configuration |
-| `.env` | Webshare API key and optional Reddit credentials |
-| `reddit_monitor.db` | SQLite database with posts table |
+| `l30d_monitor.py` | **Active monitor** — last30days retrieval, keyword gate, relevance ranking, SQLite storage |
+| `reddit_monitor.py` | **RETIRED** — old Webshare residential-proxy approach (dead, unused) |
+| `config.json` | 175 subreddits and 214 keywords configuration |
+| `reddit_monitor.db` | SQLite database with posts table (includes `relevance_score` column) |
+| `gen_dashboard.py` | Renders `index.html` dashboard from the database |
 | `requirements.txt` | Python dependencies |
 
 ---
@@ -61,8 +78,8 @@ This tool continuously monitors Reddit for music-related posts that match specif
 ### Prerequisites
 
 - Python 3.8+
-- Webshare.io account with residential proxy plan
-- (Optional) Reddit API credentials for higher rate limits
+- A Mac (or any machine with a residential IP — Reddit blocks datacenter IPs)
+- last30days skill installed in `~/.claude/skills/last30days/` (provides `lib.reddit_rss`)
 
 ### Setup
 
@@ -74,58 +91,31 @@ cd reddit-music-monitor
 # Install dependencies
 pip install -r requirements.txt
 
-# Configure environment
-cp .env.example .env
-# Edit .env and add your Webshare API key:
-# WEBSHARE_API_KEY=your_key_here
-
-# Test proxy connection
-python3 reddit_monitor.py test-proxies
+# Verify last30days RSS layer is available
+python3 -c "import sys; sys.path.insert(0, '$HOME/.claude/skills/last30days/skills/last30days/scripts'); from lib import reddit_rss; print('OK')"
 ```
 
 ---
 
 ## Usage
 
-### CLI Commands
-
 ```bash
-# Add subreddits to monitor
-python3 reddit_monitor.py add-subreddit indieheads
-python3 reddit_monitor.py add-subreddit WeAreTheMusicMakers
-
-# Add keywords to track
-python3 reddit_monitor.py add-keyword "indie artist"
-python3 reddit_monitor.py add-keyword "bandcamp"
-
-# View current configuration
-python3 reddit_monitor.py list
-
-# Start monitoring (foreground)
-python3 reddit_monitor.py run
-
-# Test proxy connection
-python3 reddit_monitor.py test-proxies
-
-# Export recent posts to JSON
-python3 reddit_monitor.py export --hours 24 --output posts.json
+# Run the monitor (fetches, filters, ranks, stores, generates dashboard)
+python3 l30d_monitor.py
 ```
 
-### Running as Background Service
+### Scheduled Execution (cron)
 
 ```bash
-# Start in background
-nohup python3 reddit_monitor.py run > monitor.log 2>&1 &
-
-# Or use the included cron job for auto-restart
-crontab -l | grep reddit-music-monitor
+# Run every 6 hours
+0 */6 * * * cd /path/to/reddit-music-monitor && python3 l30d_monitor.py >> l30d_monitor.log 2>&1
 ```
 
 ---
 
 ## Configuration
 
-### Subreddits (config.json)
+### Subreddits (config.json — 175 total)
 
 **Music-focused:**
 - `indieheads`, `WeAreTheMusicMakers`, `listentothis`
@@ -144,7 +134,7 @@ crontab -l | grep reddit-music-monitor
 - **South America:** `argentina`, `brazil`, `chile`, `colombia`, `peru`
 - **Asia:** `Japan`, `Thailand`, `Philippines`, `Indonesia`, `VietNam`, `Malaysia`, `Singapore`
 
-### Keywords (config.json)
+### Keywords (config.json — 214 total)
 
 **Artist descriptors:**
 - `indie artist`, `indie band`, `unsigned artist`, `diy artist`, `emerging artist`
@@ -177,8 +167,9 @@ CREATE TABLE posts (
     author TEXT NOT NULL,
     score INTEGER NOT NULL,
     created_utc REAL NOT NULL,
-    matched_keywords TEXT,  -- JSON array
-    raw_json TEXT,            -- Full Reddit API response
+    matched_keywords TEXT,       -- JSON array of matched keywords
+    raw_json TEXT,               -- Full post data from last30days
+    relevance_score REAL,        -- Combined keyword-density + LLM score (for ranking)
     discovered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 ```
@@ -186,8 +177,8 @@ CREATE TABLE posts (
 ### Query Examples
 
 ```bash
-# Recent posts
-sqlite3 reddit_monitor.db "SELECT * FROM posts ORDER BY discovered_at DESC LIMIT 10;"
+# Recent posts (ranked by relevance)
+sqlite3 reddit_monitor.db "SELECT title, relevance_score FROM posts ORDER BY relevance_score DESC LIMIT 10;"
 
 # Posts by region
 sqlite3 reddit_monitor.db "SELECT * FROM posts WHERE matched_keywords LIKE '%swedish%';"
@@ -201,26 +192,33 @@ sqlite3 reddit_monitor.db "SELECT COUNT(*), COUNT(DISTINCT subreddit) FROM posts
 
 ---
 
-## Proxy Rotation
+## Pipeline Details
 
-The tool uses Webshare.io's API to fetch residential proxies:
+### 1. Retrieval — last30days RSS Layer
 
-1. **Fetch proxy list** from `https://proxy.webshare.io/api/v2/proxy/list/`
-2. **Cache for 5 minutes** to avoid API rate limits
-3. **Random selection** per request for distribution
-4. **Retry logic** with different proxies on 403/429 errors
-5. **User-Agent rotation** to avoid fingerprinting
+`l30d_monitor.py` calls `lib.reddit_rss.search_rss` directly (the same keyless, multi-tier RSS/listing fetch that last30days uses). It processes subreddits in batches of 20 (175 subs → 9 calls). No residential proxies, no API key — the Mac's residential IP is sufficient because Reddit only blocks datacenter ranges.
 
-### Proxy Configuration
+### 2. Keyword Gate — Inclusion
 
-Each request uses:
-```python
-proxy_url = f"http://{username}:{password}@{proxy_address}:{port}"
-proxies = {
-    "http": proxy_url,
-    "https": proxy_url
-}
-```
+Every fetched post runs through `check_keywords(title, body, keywords)`, a case-insensitive substring match against the 214-keyword list. Posts that match zero keywords are discarded. This is the **source of truth for inclusion** — no post enters the database without at least one keyword hit.
+
+### 3. Relevance Ranking
+
+`compute_relevance` produces the `relevance_score` used for dashboard ordering:
+
+- **Keyword density**: `min(len(matched_keywords), 5) × 2.0` (0–10 range, capped)
+- **LLM score**: When available, last30days provides a `final_score` (~0–100) from deepseek-v4-flash via Ollama Cloud. The final score is `llm_score + kw_bonus`.
+- **Fallback**: When the LLM layer is unavailable, posts rank by keyword density alone (still meaningful for ordering).
+
+The relevance score **never gates inclusion** — that's already decided by `check_keywords`.
+
+### 4. Storage
+
+Posts are inserted into the SQLite `posts` table with `INSERT OR IGNORE` (deduplication by `reddit_id`). The `relevance_score` column is added via `ALTER TABLE` if missing (idempotent).
+
+### 5. Dashboard
+
+After storage, `l30d_monitor.py` calls `gen_dashboard.py`, which queries the database and renders `index.html` for the here.now live dashboard.
 
 ---
 
@@ -232,10 +230,7 @@ The dashboard auto-publishes to here.now:
 
 ```bash
 # Build HTML from database
-python3 -c "
-import sqlite3
-# ... (see repo for full script)
-"
+python3 gen_dashboard.py
 
 # Publish via here.now API
 curl -sS https://here.now/api/v1/publish \
@@ -254,7 +249,6 @@ To: alet@velab.org
 Subject: Reddit Music Monitor - Daily Summary
 
 Dashboard: https://hearty-garnet-eq9j.here.now/
-Stats: 574 posts from 73 subreddits
 ...
 EOF
 ```
@@ -262,11 +256,11 @@ EOF
 ### Cron Jobs
 
 ```bash
-# Auto-restart monitor every 10 minutes
-*/10 * * * * cd ~/reddit-webshare-monitor && (pgrep -f "reddit_monitor.py run" || nohup python3 reddit_monitor.py run > monitor.log 2>&1 &)
+# Run monitor every 6 hours
+0 */6 * * * cd /path/to/reddit-music-monitor && python3 l30d_monitor.py >> l30d_monitor.log 2>&1
 
 # Daily email report (optional)
-0 9 * * * cd ~/reddit-webshare-monitor && python3 email_report.py
+0 9 * * * cd /path/to/reddit-music-monitor && python3 email_report.py
 ```
 
 ---
@@ -275,40 +269,41 @@ EOF
 
 This project was built iteratively with Claude Code:
 
-1. **Initial Setup**: Created Python scraper with Webshare proxy integration
-2. **Keyword Tuning**: Expanded from basic keywords to 150+ music-specific terms
-3. **False Positive Removal**: Cleaned database of non-music matches (116 posts removed)
-4. **Web Dashboard**: Built HTML dashboard and published to here.now
-5. **Email Integration**: Added daily reports via Himalaya/Proton Mail
-6. **GitHub Repo**: Published to collectivewinca/reddit-music-monitor
+1. **Initial Setup**: Created Python scraper with Webshare proxy integration (now retired)
+2. **Switch to last30days**: Replaced Webshare proxies with last30days' keyless RSS retrieval — simpler, no API key, no proxy costs
+3. **Keyword Tuning**: Expanded from basic keywords to 214 music-specific terms
+4. **LLM Relevance**: Added deepseek-v4-flash scoring via Ollama Cloud for smarter ranking
+5. **Web Dashboard**: Built HTML dashboard and published to here.now
+6. **Email Integration**: Added daily reports via Himalaya/Proton Mail
+7. **GitHub Repo**: Published to collectivewinca/reddit-music-monitor
 
 ### Key Decisions
 
 - **SQLite over Postgres**: Single-file, zero-config, sufficient for this scale
-- **JSON keywords**: Flexible matching, easy to inspect
-- **Proxy rotation**: Avoids Reddit blocks that affected VM IPs
+- **last30days over proxies**: Keyless RSS retrieval avoids proxy costs and API key management; residential IP is the only requirement
+- **Keyword gate + LLM ranking**: Decoupled inclusion (cheap substring match) from ranking (optional LLM) — fast, flexible, no lock-in
 - **Regional focus**: Prioritized underrepresented music scenes
 
 ---
 
 ## Troubleshooting
 
-**No proxies fetched:**
-- Check `WEBSHARE_API_KEY` in `.env`
-- Verify active proxy plan at webshare.io
+**No posts found:**
+- Check that last30days is installed: `ls ~/.claude/skills/last30days/skills/last30days/scripts/lib/reddit_rss.py`
+- Verify config.json has subreddits and keywords
+- Run `python3 l30d_monitor.py` and check logs
 
-**All requests fail:**
-- Run `python3 reddit_monitor.py test-proxies`
-- Check proxy list: `curl -H "Authorization: Token $WEBSHARE_API_KEY" https://proxy.webshare.io/api/v2/proxy/list/`
-
-**Rate limited by Reddit:**
-- Increase `check_interval_minutes` in config.json
-- Reduce `max_posts_per_check`
-- Verify proxy rotation is working
+**Reddit blocks requests:**
+- Ensure you're running on a residential IP (Mac at home), not a datacenter VM
+- last30days' RSS layer handles rate-limiting internally
 
 **Database locked:**
-- Stop the monitor: `pkill -f reddit_monitor.py`
-- Check for zombie processes: `ps aux | grep reddit_monitor`
+- Stop any running monitor: `pkill -f l30d_monitor.py`
+- Check for zombie processes: `ps aux | grep l30d_monitor`
+
+**Dashboard not updating:**
+- Run `python3 gen_dashboard.py` manually to check for errors
+- Verify the database has new posts
 
 ---
 
@@ -320,7 +315,7 @@ MIT - Feel free to fork and adapt for your own music discovery needs.
 
 ## Credits
 
-- **Webshare.io** - Residential proxy infrastructure
-- **here.now** - Free static hosting for the dashboard
-- **Himalaya** - CLI email client for reports
-- **Claude Code** - Assisted development
+- **last30days** — Keyless Reddit RSS retrieval layer
+- **here.now** — Free static hosting for the dashboard
+- **Himalaya** — CLI email client for reports
+- **Claude Code** — Assisted development

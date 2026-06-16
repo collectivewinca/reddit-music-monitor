@@ -4,6 +4,17 @@ Reddit Monitor with Webshare.io Residential Proxies
 Monitors subreddits for keywords using rotating residential proxies
 """
 
+# ╔══════════════════════════════════════════════════════════════════════════╗
+# ║  RETIRED — this file is no longer used.                                 ║
+# ║                                                                          ║
+# ║  The Webshare residential-proxy approach was abandoned because Reddit    ║
+# ║  blocks datacenter IPs. The active monitor is l30d_monitor.py, which      ║
+# ║  uses last30days' keyless Reddit RSS retrieval (no proxies, no API key   ║
+# ║  needed for retrieval). It runs on a Mac / residential IP.              ║
+# ║                                                                          ║
+# ║  See l30d_monitor.py for the current pipeline.                           ║
+# ╚══════════════════════════════════════════════════════════════════════════╝
+
 import os
 import sys
 import json
