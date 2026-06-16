@@ -10,3 +10,6 @@ venv/
 
 # Generated dashboard output
 index.html
+
+# rotation cursor (runtime state)
+.sub_cursor

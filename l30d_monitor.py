@@ -15,14 +15,22 @@ import re
 import sqlite3
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 DB_PATH = SCRIPT_DIR / "reddit_monitor.db"
 CONFIG_PATH = SCRIPT_DIR / "config.json"
+CURSOR_PATH = SCRIPT_DIR / ".sub_cursor"
 TOPIC = "new indie and underground music releases and emerging artists"
-BATCH_SIZE = 20  # subreddits per last30days RSS call (175 subs -> 9 calls)
+# Reddit throttles ~175 rapid feed pulls from one IP, so each run covers a
+# ROTATING window of the sub list (full sweep ~daily at a 6h cron) and paces
+# the RSS calls: small batches, light depth, and a sleep between batches.
+SUB_WINDOW = 30          # subreddits processed per run (rotates across runs)
+BATCH_SIZE = 6           # subreddits per last30days RSS call
+RSS_DEPTH = "default"    # 'deep' fires too many feed URLs per sub at scale
+INTER_BATCH_SLEEP = 5    # seconds between RSS batches
 
 # Call last30days' keyless Reddit retrieval layer DIRECTLY (it handles Reddit
 # rate-limiting via multi-tier RSS/listing fetch). We use its broad discovery
@@ -105,9 +113,11 @@ def fetch_posts(subreddits: list[str]) -> list[dict]:
     """
     posts: list[dict] = []
     for i in range(0, len(subreddits), BATCH_SIZE):
+        if i > 0:
+            time.sleep(INTER_BATCH_SLEEP)  # pace RSS calls to avoid Reddit throttling
         batch = subreddits[i : i + BATCH_SIZE]
         try:
-            raw = reddit_rss.search_rss(TOPIC, depth="deep", subreddits=batch) or []
+            raw = reddit_rss.search_rss(TOPIC, depth=RSS_DEPTH, subreddits=batch) or []
         except Exception as e:  # keyless layer is best-effort; never abort the run
             logger.warning(f"batch {i // BATCH_SIZE} ({batch[0]}…) failed: {e}")
             continue
@@ -222,11 +232,31 @@ def run_dashboard() -> None:
         logger.warning(f"dashboard generation failed (Step 2 path fix pending): {e}")
 
 
+def _read_cursor() -> int:
+    try:
+        return int(CURSOR_PATH.read_text().strip())
+    except (OSError, ValueError):
+        return 0
+
+
+def _select_window(all_subs: list[str]) -> list[str]:
+    """Rotate through the full sub list across runs so no single run hammers Reddit."""
+    if not all_subs:
+        return []
+    n = len(all_subs)
+    off = _read_cursor() % n
+    window = (all_subs + all_subs)[off : off + SUB_WINDOW]  # wrap-around
+    CURSOR_PATH.write_text(str((off + SUB_WINDOW) % n))
+    return window
+
+
 def main() -> int:
     cfg = load_config()
-    subreddits = cfg.get("subreddits", [])
+    all_subs = cfg.get("subreddits", [])
     keywords = cfg.get("keywords", [])
 
+    subreddits = _select_window(all_subs)
+    logger.info(f"covering {len(subreddits)} of {len(all_subs)} subreddits (rotating window)")
     raw = fetch_posts(subreddits)
     # Phase 1 — keyword gate (inclusion only, no ranking)
     gated: list[dict] = []
