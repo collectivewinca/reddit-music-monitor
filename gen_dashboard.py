@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 import html as html_mod
 import json
+from pathlib import Path
 import sqlite3
 
-DB_PATH = "/root/projects/reddit-music-monitor/reddit_monitor.db"
-OUT_PATH = "/root/projects/reddit-music-monitor/index.html"
+SCRIPT_DIR = Path(__file__).resolve().parent
+DB_PATH = SCRIPT_DIR / "reddit_monitor.db"
+OUT_PATH = SCRIPT_DIR / "index.html"
 
 conn = sqlite3.connect(DB_PATH)
 cursor = conn.cursor()
 
 cursor.execute(
-    "SELECT title, subreddit, author, score, url, matched_keywords, discovered_at "
-    "FROM posts ORDER BY discovered_at DESC LIMIT 50"
+    "SELECT title, subreddit, author, score, url, matched_keywords, discovered_at, "
+    "COALESCE(relevance_score, 0) AS rel FROM posts ORDER BY rel DESC, discovered_at DESC LIMIT 50"
 )
 posts = cursor.fetchall()
 
@@ -49,7 +51,7 @@ html = head + f"""<div class="stats">
 """
 
 for post in posts:
-    title, sub, author, score, url, kw, dt = post
+    title, sub, author, score, url, kw, dt, rel = post
     kw_str = ", ".join(json.loads(kw)) if kw else ""
     safe_title = html_mod.escape(str(title))
     safe_sub = html_mod.escape(str(sub))
@@ -60,6 +62,8 @@ for post in posts:
     html += f'<div class="post-meta">r/{safe_sub} | u/{safe_author} | {score} upvotes | {dt}</div>'
     if safe_kw:
         html += f'<div class="post-kw">{safe_kw}</div>'
+    if rel > 0:
+        html += f'<div class="post-kw">relevance {int(rel)}</div>'
     html += "</div>\n"
 
 html += "</body></html>"
