@@ -141,10 +141,38 @@ def fetch_posts(subreddits: list[str]) -> list[dict]:
     return posts
 
 
-def check_keywords(title: str, body: str, keywords: list[str]) -> list[str]:
-    """Reused from reddit_monitor.py: case-insensitive substring match (the inclusion gate)."""
+# Reddit's standard "new music" post tags and the streaming/DIY platforms a real
+# release links to. These are high-precision inclusion signals the keyword gate
+# missed: the keyless RSS layer yields title-only items (no body), so phrase
+# keywords that relied on body text rarely fire — but a [FRESH] tag or a
+# bandcamp/soundcloud link in the URL is near-certain new-music evidence.
+_FRESH_RE = re.compile(r"\[\s*(?:fresh[a-z ]*|fm|premiere)\s*\]", re.I)
+_PLATFORM_RE = re.compile(
+    r"(bandcamp\.com|soundcloud\.com|(?:open\.)?spotify\.com|music\.apple\.com)", re.I
+)
+
+
+def _phrase_in(text: str, kw: str) -> bool:
+    """Whole-word match on the keyword as a unit (boundaries on both ends), e.g.
+    'indie band' must appear adjacent — NOT 'indie' and 'band' scattered apart.
+    Tested the loose all-words-present variant; on the keyless layer's short
+    titles it gave ~zero recall lift (both words are adjacent anyway when present)
+    but added false positives ('New phone release' -> 'new release'). Boundaries
+    still fix the substring noise (so 'new' won't fire inside 'newest')."""
+    return re.search(rf"\b{re.escape(kw.lower())}\b", text) is not None
+
+
+def check_keywords(title: str, body: str, keywords: list[str], url: str = "") -> list[str]:
+    """Inclusion gate: whole-word keyword match (phrases = all-words-present)
+    plus structural signals (FRESH/premiere tags, platform links)."""
     text = f"{title} {body}".lower()
-    return [kw for kw in keywords if kw.lower() in text]
+    matched = [kw for kw in keywords if _phrase_in(text, kw)]
+    if _FRESH_RE.search(title or ""):
+        matched.append("[fresh]")
+    plat = _PLATFORM_RE.search(url or "")
+    if plat:
+        matched.append(f"link:{plat.group(1).split('.')[0]}")
+    return matched
 
 
 def compute_relevance(matched_keywords: list[str], llm_score: float | None) -> float | None:
@@ -261,7 +289,7 @@ def main() -> int:
     # Phase 1 — keyword gate (inclusion only, no ranking)
     gated: list[dict] = []
     for p in raw:
-        matched = check_keywords(p["title"], p["body"], keywords)
+        matched = check_keywords(p["title"], p["body"], keywords, p.get("url", ""))
         if not matched:
             continue  # keyword gate = source of truth for inclusion
         p["matched_keywords"] = matched
