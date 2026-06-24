@@ -42,7 +42,7 @@ artists = []
 if _table_exists("comment_artists"):
     rows = cur.execute(
         "SELECT name, mentions, sources FROM comment_artists "
-        "ORDER BY mentions DESC, updated_at DESC LIMIT 30"
+        "ORDER BY mentions DESC, updated_at DESC LIMIT 60"
     ).fetchall()
     for r in rows:
         ids = [s for s in (r["sources"] or "").split(",") if s]
@@ -85,25 +85,30 @@ updated = datetime.now(timezone.utc).strftime("%d %b %Y · %H:%M UTC")
 
 
 # ---- render helpers -------------------------------------------------------
-def signal_bars(mentions: int) -> str:
-    """Equalizer glyph: 5 bars, filled in proportion to cross-thread mentions."""
+def signal_bars(mentions: int, mini: bool = False) -> str:
+    """Equalizer glyph: 5 bars, filled in proportion to cross-thread mentions.
+    `mini` renders a shorter glyph for the compact artist roster rows."""
     filled = max(1, min(5, mentions))
+    base, step = (4, 2) if mini else (6, 4)
     bars = "".join(
-        f'<span class="bar{" on" if i < filled else ""}" style="height:{6 + i * 4}px"></span>'
+        f'<span class="bar{" on" if i < filled else ""}" style="height:{base + i * step}px"></span>'
         for i in range(5)
     )
-    return f'<span class="bars" title="{mentions} thread(s)">{bars}</span>'
+    cls = "bars mini" if mini else "bars"
+    return f'<span class="{cls}" title="{mentions} thread(s)">{bars}</span>'
 
 
-def artist_card(rank: int, a: dict) -> str:
+def artist_row(rank: int, a: dict) -> str:
+    """One compact, scannable roster line (vs the old 128px card). Subreddits move
+    to the hover tooltip so the row stays single-line and the section stays dense."""
     name = H.escape(a["name"])
     subs = " · ".join("r/" + H.escape(s) for s in a["subs"]) or "music threads"
     q = H.escape(a["name"]).replace(" ", "+")
-    return f"""<a class="card artist" href="https://www.google.com/search?q={q}+band+music" target="_blank" rel="noopener">
-      <span class="rank">{rank:02d}</span>
-      <div class="aname">{name}</div>
-      <div class="ameta">{subs}</div>
-      <div class="arow">{signal_bars(a["mentions"])}<span class="mcount">{a["mentions"]}×</span></div>
+    return f"""<a class="arow-item" href="https://www.google.com/search?q={q}+band+music" target="_blank" rel="noopener" title="{subs}">
+      <span class="arank">{rank:02d}</span>
+      <span class="aname2">{name}</span>
+      <span class="aspark">{signal_bars(a["mentions"], mini=True)}</span>
+      <span class="acount">{a["mentions"]}&times;</span>
     </a>"""
 
 
@@ -140,7 +145,7 @@ if lead:
       <div class="lead-meta">{signal_bars(lead["mentions"])}<span>surfaced across {lead["mentions"]} thread{plural}{subline}</span></div>
     </section>"""
 
-artist_html = "".join(artist_card(i + 1, a) for i, a in enumerate(artists)) or \
+artist_html = "".join(artist_row(i + 1, a) for i, a in enumerate(artists)) or \
     '<div class="empty">No artists mined yet — run mine_comments.py.</div>'
 highlight_html = "".join(highlight_card(p) for p in highlights) or \
     '<div class="empty">No highlights yet.</div>'
@@ -181,8 +186,24 @@ a{color:inherit;text-decoration:none}
 .shead .desc{color:var(--muted);font-size:13px;margin-left:auto;text-align:right}
 
 .grid{display:grid;gap:14px}
-.grid.artists{grid-template-columns:repeat(auto-fill,minmax(212px,1fr))}
 .grid.hls{grid-template-columns:repeat(auto-fill,minmax(300px,1fr))}
+
+/* Compact, scannable artist roster (replaces the old big-card grid) */
+.roster{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));
+  gap:0 30px}
+.arow-item{display:flex;align-items:center;gap:11px;padding:8px 10px;
+  border-bottom:1px solid var(--line);border-radius:7px;
+  transition:background .12s ease}
+.arow-item:hover{background:var(--lilac)}
+.arow-item:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+.arank{font-family:'Space Mono',monospace;font-size:11px;color:var(--muted);
+  width:20px;flex:none}
+.aname2{font-family:'Space Grotesk',sans-serif;font-weight:500;font-size:14.5px;
+  letter-spacing:-.01em;flex:1 1 auto;min-width:0;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.aspark{flex:none;margin-left:auto;display:inline-flex;align-items:flex-end}
+.acount{font-family:'Space Mono',monospace;font-size:12px;color:var(--accent);
+  flex:none;width:30px;text-align:right}
 
 .card{display:block;background:var(--card);border:1px solid var(--line);
   border-radius:14px;padding:18px;
@@ -191,16 +212,10 @@ a{color:inherit;text-decoration:none}
   box-shadow:0 10px 30px -18px rgba(91,75,232,.5)}
 .card:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 
-.artist{position:relative;min-height:128px;display:flex;flex-direction:column}
-.rank{font-family:'Space Mono',monospace;font-size:11px;color:var(--muted)}
-.aname{font-family:'Space Grotesk',sans-serif;font-weight:500;font-size:19px;
-  letter-spacing:-.01em;margin-top:6px;line-height:1.15}
-.ameta{color:var(--muted);font-size:12px;margin-top:6px}
-.arow{display:flex;align-items:flex-end;gap:10px;margin-top:auto;padding-top:14px}
-.mcount{font-family:'Space Mono',monospace;font-size:12px;color:var(--accent)}
-
 .bars{display:inline-flex;align-items:flex-end;gap:3px;height:22px}
+.bars.mini{height:12px;gap:2px}
 .bars .bar{width:3px;border-radius:2px;background:var(--line);display:inline-block}
+.bars.mini .bar{width:2.5px}
 .bars .bar.on{background:var(--accent)}
 
 .hl{display:flex;flex-direction:column;gap:9px}
@@ -243,10 +258,10 @@ html = f"""<!DOCTYPE html>
 
   <section class="section">
     <div class="shead">
-      <h2>Emerging artists</h2><span class="count">{artist_count} tracked</span>
-      <span class="desc">Ranked by how many threads recommend them</span>
+      <h2>Emerging artists</h2><span class="count">top {len(artists)} of {artist_count}</span>
+      <span class="desc">Ranked by how many threads recommend them · hover for subs</span>
     </div>
-    <div class="grid artists">{artist_html}</div>
+    <div class="roster">{artist_html}</div>
   </section>
 
   <section class="section">
