@@ -39,6 +39,43 @@ notify() {  # $1 = message; SMS via Quo (api.quo.com). Never fail the run on a n
     >/dev/null 2>&1 || echo "$(ts) - WARN - quo SMS notify failed" >> "$LOG"
 }
 
+# --- Single-instance guard for the WHOLE pipeline ---
+# l30d_monitor.py's fcntl lock only covers its own phase; mine_comments +
+# dashboard + publish run after it releases. macOS cron has no overlap guard, so
+# a long run can collide with the next 6h fire. Atomic mkdir lock (no flock on
+# macOS) + PID-liveness check that reclaims a stale lock from a crashed run.
+LOCKDIR="$DIR/.run.lock.d"
+if ! mkdir "$LOCKDIR" 2>/dev/null; then
+  holder="$(cat "$LOCKDIR/pid" 2>/dev/null || true)"
+  if [[ -n "$holder" ]] && kill -0 "$holder" 2>/dev/null; then
+    echo "$(ts) - WARN - run already in progress (pid $holder); skipping" >> "$LOG"
+    exit 0
+  fi
+  echo "$(ts) - WARN - reclaiming stale run lock (holder ${holder:-?} gone)" >> "$LOG"
+fi
+echo "$$" > "$LOCKDIR/pid"
+trap 'rm -rf "$LOCKDIR"' EXIT
+
+# --- Portable timeout (no `timeout`/`gtimeout` on stock macOS) ---
+# Runs the command in the background and TERMs it after N seconds; returns the
+# command's own exit code, or 124 on timeout (matching GNU `timeout`).
+run_with_timeout() {  # $1 = seconds; $2.. = command (may be a shell function)
+  local secs="$1"; shift
+  "$@" &
+  local cmd_pid=$!
+  ( sleep "$secs"; kill -TERM "$cmd_pid" 2>/dev/null ) &
+  local killer=$!
+  local rc=0
+  wait "$cmd_pid" 2>/dev/null || rc=$?
+  if ! kill -0 "$killer" 2>/dev/null; then
+    rc=124              # killer already fired its TERM -> this was a timeout
+  else
+    kill -TERM "$killer" 2>/dev/null   # cmd finished first; cancel the killer
+  fi
+  wait "$killer" 2>/dev/null || true
+  return "$rc"
+}
+
 # --- Watchdog 1: retired webshare-proxy zombie resurrected? ---
 if pgrep -fl 'reddit-webshare-monitor' >/dev/null 2>&1; then
   echo "$(ts) - WARN - retired webshare zombie process detected" >> "$LOG"
@@ -50,6 +87,7 @@ shopt -s nullglob
 for f in "$DIR"/*.log; do
   sz=$(stat -f%z "$f" 2>/dev/null || echo 0)
   if (( sz > MAX_LOG )); then
+    rm -f "$f.rot"  # clear any leftover from a prior interrupted rotation
     tail -c 5242880 "$f" > "$f.rot" && mv "$f.rot" "$f"
     echo "$(ts) - INFO - rotated $(basename "$f") (was $((sz/1048576))MB)" >> "$LOG"
     notify "🧹 reddit-music-monitor: rotated $(basename "$f") (was $((sz/1048576))MB)."
@@ -57,6 +95,11 @@ for f in "$DIR"/*.log; do
 done
 
 # --- Run the monitor; tee output to the log and capture for alerting ---
+# l30d_monitor.py writes a .run_ok sentinel ("1"/"0") telling us whether this run
+# is healthy enough to (re)publish — so a thin/throttled run can't present stale
+# data as fresh, and the dashboard is rendered exactly ONCE per run (here, after
+# comment-mining) instead of twice.
+rm -f "$DIR/.run_ok"
 OUT="$("$PY" l30d_monitor.py 2>&1)"
 printf '%s\n' "$OUT" >> "$LOG"
 
@@ -65,9 +108,17 @@ if line=$(grep -m1 -E "CANARY (zero-match|empty-fetch)" <<<"$OUT"); then
   notify "🔴 reddit-music-monitor: ${line#*WARNING - }"
 fi
 
+RUN_OK="$(cat "$DIR/.run_ok" 2>/dev/null || echo 0)"
+if [[ "$RUN_OK" != "1" ]]; then
+  echo "$(ts) - INFO - run not healthy (canary gate); skipping mine + dashboard + publish" >> "$LOG"
+  exit 0
+fi
+
 # --- Comment-intelligence: mine artist recommendations from thread comments ---
-# Best-effort (needs Chrome running with CDP for opencli's reddit read); never blocks.
-"$PY" mine_comments.py >> "$LOG" 2>&1 || echo "$(ts) - WARN - mine_comments failed" >> "$LOG"
+# Best-effort (needs Chrome running with CDP for opencli's reddit read); never
+# blocks. Hard-capped so an unresponsive Chrome/CDP can't stall the pipeline.
+run_with_timeout 300 "$PY" mine_comments.py >> "$LOG" 2>&1 \
+  || echo "$(ts) - WARN - mine_comments failed or timed out" >> "$LOG"
 
 # --- Render the MINY A&R Radar dashboard (now includes mined artists) ---
 "$PY" gen_dashboard.py >> "$LOG" 2>&1 || echo "$(ts) - WARN - dashboard render failed" >> "$LOG"
@@ -75,9 +126,10 @@ fi
 # --- Publish the dashboard to a stable here.now slug (updates in place) ---
 SLUG=olive-monsoon-n9ct
 STAGE="$(mktemp -d)/d" && mkdir -p "$STAGE" && cp "$DIR/index.html" "$STAGE/index.html"
-if ( cd "$STAGE" && bash "$HOME/.claude/skills/here-now/scripts/publish.sh" . --slug "$SLUG" --client claude-code ) >> "$LOG" 2>&1; then
+do_publish() { ( cd "$STAGE" && bash "$HOME/.claude/skills/here-now/scripts/publish.sh" . --slug "$SLUG" --client claude-code ); }
+if run_with_timeout 120 do_publish >> "$LOG" 2>&1; then
   echo "$(ts) - INFO - published -> https://$SLUG.here.now/" >> "$LOG"
 else
-  echo "$(ts) - WARN - here.now publish failed" >> "$LOG"
+  echo "$(ts) - WARN - here.now publish failed or timed out" >> "$LOG"
 fi
 rm -rf "$STAGE"

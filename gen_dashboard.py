@@ -12,6 +12,8 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
+from ranking import MIN_RELEVANCE, signal_score
+
 SCRIPT_DIR = Path(__file__).resolve().parent
 DB_PATH = SCRIPT_DIR / "reddit_monitor.db"
 OUT_PATH = SCRIPT_DIR / "index.html"
@@ -55,13 +57,29 @@ if _table_exists("comment_artists"):
         artists.append({"name": r["name"], "mentions": r["mentions"], "subs": subs[:3]})
 
 # ---- highlights (releases & threads worth a listen) -----------------------
-highlights = cur.execute(
-    "SELECT title, subreddit, score, url, matched_keywords, "
-    "COALESCE(relevance_score, 0) AS rel FROM posts "
-    "ORDER BY rel DESC, discovered_at DESC LIMIT 12"
+# Rank by an ON-TOPIC signal score, NOT by upvotes. In this dataset the two
+# signals are disjoint: posts are captured seconds after they're posted, so
+# on-topic music releases sit at ~0 upvotes forever, while the only high-upvote
+# posts are off-topic keyword false-positives (r/bangalore, politics) that the
+# LLM relevance scorer correctly zeroed. Ranking by upvotes just imports that
+# off-topic noise — so we rank on-topic posts (rel>0) by relevance, then demote
+# keyword-stuffed self-promo and boost curated release/discussion posts.
+_candidates = cur.execute(
+    "SELECT title, subreddit, url, matched_keywords, "
+    "COALESCE(relevance_score, 0) AS rel, discovered_at FROM posts"
 ).fetchall()
 
 conn.close()
+
+# Ranking logic (signal_score, the promo/curated regexes, and the tunable
+# weights) lives in ranking.py so it's unit-testable without this script's
+# module-level DB read. Only on-topic posts (rel>MIN_RELEVANCE) are eligible;
+# off-topic upvote magnets have rel=0.
+highlights = sorted(
+    (p for p in _candidates if (p["rel"] or 0) > MIN_RELEVANCE),
+    key=signal_score,
+    reverse=True,
+)[:12]
 lead = artists[0] if artists else None
 updated = datetime.now(timezone.utc).strftime("%d %b %Y · %H:%M UTC")
 
@@ -100,10 +118,14 @@ def highlight_card(p) -> str:
     except Exception:
         kws = ""
     kw_html = f'<div class="tags">{H.escape(kws[:80])}</div>' if kws else ""
-    rel_html = f'<span class="rel">{rel:.0f}</span>' if rel else ""
+    # Upvotes are ~0 for freshly-captured posts (see signal_score note), so we
+    # surface the SIGNAL RANK score (rel after promo/curated adjustment) — the
+    # actual sort key — not raw relevance, so the badge matches the ordering.
+    sig = signal_score(p)
+    rel_html = f'<span class="rel" title="signal rank">signal {sig:.0f}</span>' if rel else ""
     return f"""<a class="card hl" href="{safe_url}" target="_blank" rel="noopener">
       <div class="hl-title">{title}</div>
-      <div class="hl-meta"><span class="sub">r/{sub}</span><span class="dot">·</span><span>{p["score"]} upvotes</span>{rel_html}</div>
+      <div class="hl-meta"><span class="sub">r/{sub}</span><span class="dot">·</span>{rel_html}</div>
       {kw_html}
     </a>"""
 

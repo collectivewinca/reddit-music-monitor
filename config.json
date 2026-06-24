@@ -394,5 +394,10 @@
   ],
   "check_interval_minutes": 30,
   "min_score_threshold": 3,
-  "max_posts_per_check": 50
+  "max_posts_per_check": 50,
+  "highlights": {
+    "promo_penalty": 60,
+    "curated_boost": 25,
+    "min_relevance": 0
+  }
 }

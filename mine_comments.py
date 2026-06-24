@@ -62,13 +62,17 @@ def get_conn() -> sqlite3.Connection:
 
 
 def select_threads(conn: sqlite3.Connection) -> list[dict]:
-    qmarks = ",".join("?" * len(DISCOVERY_SUBS))
+    # SQLite TEXT IN(...) is case-sensitive and posts.subreddit is stored verbatim
+    # from RSS (e.g. "music"), so match case-insensitively — otherwise mixed-case
+    # entries like "Music"/"LetsTalkMusic" here would silently never match.
+    subs_lc = tuple(s.lower() for s in DISCOVERY_SUBS)
+    qmarks = ",".join("?" * len(subs_lc))
     rows = conn.execute(
         f"""SELECT reddit_id, subreddit, title, url FROM posts
             WHERE url LIKE '%reddit.com/r/%/comments/%'
-              AND subreddit IN ({qmarks})
+              AND LOWER(subreddit) IN ({qmarks})
             ORDER BY discovered_at DESC LIMIT ?""",
-        (*DISCOVERY_SUBS, MAX_THREADS),
+        (*subs_lc, MAX_THREADS),
     ).fetchall()
     return [{"id": r[0], "subreddit": r[1], "title": r[2], "url": r[3]} for r in rows]
 
@@ -146,8 +150,8 @@ def main() -> int:
         for a in artists:
             upsert(conn, a, t["id"])
             total += 1
+        conn.commit()  # persist per-thread so a mid-run kill keeps prior progress
         logger.info(f'r/{t["subreddit"]}: {len(artists)} artists from "{t["title"][:45]}"')
-    conn.commit()
 
     top = conn.execute(
         "SELECT name, mentions FROM comment_artists ORDER BY mentions DESC, updated_at DESC LIMIT 25"

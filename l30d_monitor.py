@@ -16,7 +16,6 @@ import os
 import re
 import signal
 import sqlite3
-import subprocess
 import sys
 import time
 from datetime import datetime, timezone
@@ -27,6 +26,11 @@ DB_PATH = SCRIPT_DIR / "reddit_monitor.db"
 CONFIG_PATH = SCRIPT_DIR / "config.json"
 CURSOR_PATH = SCRIPT_DIR / ".sub_cursor"
 LOCK_PATH = SCRIPT_DIR / ".monitor.lock"
+# Canary gate handoff: main() writes "1" here when the run is healthy enough to
+# (re)publish, else "0". run.sh reads it and only then renders+publishes the
+# dashboard — so a thin/throttled run can't present stale data as fresh, and the
+# dashboard is rendered ONCE per run (by run.sh) instead of twice.
+RUN_OK_PATH = SCRIPT_DIR / ".run_ok"
 TOPIC = "new indie and underground music releases and emerging artists"
 # Reddit throttles ~175 rapid feed pulls from one IP, so each run covers a
 # ROTATING window of the sub list (full sweep ~daily at a 6h cron) and paces
@@ -233,6 +237,13 @@ def score_with_llm(posts: list[dict]) -> None:
         data = client.generate_json(runtime.rerank_model, prompt)
         if not isinstance(data, dict):
             return
+        # A truncated/partial LLM response silently leaves most posts on the
+        # keyword-only fallback; surface that degradation instead of hiding it.
+        if len(data) < len(posts) * 0.5:
+            logger.warning(
+                f"LLM scored only {len(data)}/{len(posts)} posts (partial response); "
+                f"the rest fall back to keyword-only ranking"
+            )
         for i, p in enumerate(posts):
             v = data.get(str(i))
             try:
@@ -265,11 +276,12 @@ def store_posts(conn: sqlite3.Connection, records: list[dict]) -> int:
     return new
 
 
-def run_dashboard() -> None:
+def _set_run_ok(ok: bool) -> None:
+    """Record whether run.sh should render+publish the dashboard this run."""
     try:
-        subprocess.run([sys.executable, str(SCRIPT_DIR / "gen_dashboard.py")], check=True)
-    except subprocess.CalledProcessError as e:
-        logger.warning(f"dashboard generation failed (Step 2 path fix pending): {e}")
+        RUN_OK_PATH.write_text("1" if ok else "0")
+    except OSError as e:
+        logger.warning(f"could not write run-ok sentinel: {e}")
 
 
 def _read_cursor() -> int:
@@ -381,6 +393,7 @@ def main() -> int:
         # only insert junk (or nothing) and a 0-delta rebuild can present stale
         # data as fresh. Better to no-op and let the next 6h fire try a cool IP.
         logger.warning(f"retrieval tier '{tier}' (not 'ok'); skipping run to avoid thin data")
+        _set_run_ok(False)
         return 0
     logger.info("tier probe ok (rich tier available); proceeding")
 
@@ -410,8 +423,9 @@ def main() -> int:
     conn = get_conn()
     new = store_posts(conn, gated)
     conn.close()
-    if emit_canary(len(raw), len(gated), new):
-        run_dashboard()
+    # Hand the publish decision to run.sh (which owns the single dashboard render
+    # AFTER comment-mining), gated on the canary verdict.
+    _set_run_ok(emit_canary(len(raw), len(gated), new))
     return 0
 
 

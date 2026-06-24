@@ -14,8 +14,12 @@ index.html
 # rotation cursor (runtime state)
 .sub_cursor
 
-# single-instance lock (runtime state)
+# single-instance locks (runtime state)
 .monitor.lock
+.run.lock.d/
+
+# canary publish-gate sentinel (runtime state)
+.run_ok
 
 # Telegram alert chat id (local config; not a secret but env-specific)
 .telegram_chat
