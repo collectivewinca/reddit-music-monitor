@@ -220,14 +220,20 @@ def compute_relevance(matched_keywords: list[str], llm_score: float | None) -> f
 
 
 def score_with_llm(posts: list[dict]) -> None:
-    """Fill each post's llm_score (0-100) via last30days' deepseek client. Best-effort."""
+    """Fill each post's llm_score (0-100) via last30days' rerank model. Best-effort.
+
+    The model is configured via last30days (see .claude/last30days.env →
+    LAST30DAYS_RERANK_MODEL); currently glm-5.2. It's the only ON-TOPIC signal —
+    keyword-only fallback ranks by raw keyword count and lets off-topic geo-sub
+    false-positives through — so low LLM coverage is logged as a grep-able CANARY.
+    """
     if not posts:
         return
     try:
         cfg = l30_env.get_config()
         runtime, client = l30_prov.resolve_runtime(cfg, "quick")
         if client is None:
-            logger.warning("no LLM client available; keeping keyword-only ranking")
+            logger.warning("CANARY llm-unavailable: no LLM client; keyword-only ranking")
             return
         lines = [f"{i}. r/{p['subreddit']}: {p['title']}" for i, p in enumerate(posts)]
         prompt = (
@@ -238,22 +244,29 @@ def score_with_llm(posts: list[dict]) -> None:
         )
         data = client.generate_json(runtime.rerank_model, prompt)
         if not isinstance(data, dict):
+            logger.warning(f"CANARY llm-bad-response: {runtime.rerank_model} returned "
+                           f"non-dict; keyword-only ranking")
             return
-        # A truncated/partial LLM response silently leaves most posts on the
-        # keyword-only fallback; surface that degradation instead of hiding it.
-        if len(data) < len(posts) * 0.5:
-            logger.warning(
-                f"LLM scored only {len(data)}/{len(posts)} posts (partial response); "
-                f"the rest fall back to keyword-only ranking"
-            )
+        scored = 0
         for i, p in enumerate(posts):
             v = data.get(str(i))
             try:
                 p["llm_score"] = float(v) if v is not None else None
             except (TypeError, ValueError):
                 p["llm_score"] = None
+            if p["llm_score"] is not None:
+                scored += 1
+        # Coverage canary: keyword-only fallback inverts the ranking (stuffed spam
+        # beats sparse genuine releases) and re-admits off-topic posts, so a
+        # thin-scoring run must be VISIBLE, not silent. run.sh greps for CANARY.
+        rate = scored / len(posts)
+        if rate < 0.5:
+            logger.warning(f"CANARY low-llm-coverage: {runtime.rerank_model} scored "
+                           f"{scored}/{len(posts)} ({rate:.0%}); rest keyword-only")
+        else:
+            logger.info(f"LLM scored {scored}/{len(posts)} ({rate:.0%}) via {runtime.rerank_model}")
     except Exception as e:
-        logger.warning(f"LLM scoring failed ({e}); continuing with keyword-only ranking")
+        logger.warning(f"CANARY llm-error: scoring failed ({e}); keyword-only ranking")
 
 
 def store_posts(conn: sqlite3.Connection, records: list[dict]) -> int:

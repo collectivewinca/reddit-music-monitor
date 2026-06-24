@@ -117,7 +117,10 @@ OUT="$("$PY" l30d_monitor.py 2>&1)"
 printf '%s\n' "$OUT" >> "$LOG"
 
 # --- Alert on hard failures only (the canary already logs low-capture) ---
-if line=$(grep -m1 -E "CANARY (zero-match|empty-fetch)" <<<"$OUT"); then
+# Catches retrieval canaries (zero-match/empty-fetch) AND scoring canaries
+# (low-llm-coverage/llm-unavailable/llm-bad-response/llm-error) — the latter mean
+# the on-topic LLM signal degraded and the ranking may have inverted to keyword-only.
+if line=$(grep -m1 -E "CANARY (zero-match|empty-fetch|low-llm-coverage|llm-unavailable|llm-bad-response|llm-error)" <<<"$OUT"); then
   notify "🔴 reddit-music-monitor: ${line#*WARNING - }"
 fi
 
