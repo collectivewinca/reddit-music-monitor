@@ -54,11 +54,13 @@ _CURATED = re.compile(
 )
 
 
-def signal_score(p) -> float:
+def signal_score(p, promo_penalty: float = PROMO_PENALTY,
+                 curated_boost: float = CURATED_BOOST) -> float:
     """On-topic signal rank for the highlights showcase. Higher = better.
 
     Accepts any mapping with "rel" (relevance_score) and "title" keys — an
-    sqlite3.Row in production, a plain dict in tests.
+    sqlite3.Row in production, a plain dict in tests. Weights default to the
+    config-loaded constants but are overridable per-call (tests, tuning).
 
     Promo and curated markers are mutually exclusive with promo taking
     precedence: a begging title can't buy its way back into the showcase by
@@ -69,7 +71,7 @@ def signal_score(p) -> float:
     s = p["rel"] or 0
     title = p["title"] or ""
     if _PROMO.search(title):
-        return s - PROMO_PENALTY
+        return s - promo_penalty
     if _CURATED.search(title):
-        return s + CURATED_BOOST
+        return s + curated_boost
     return s

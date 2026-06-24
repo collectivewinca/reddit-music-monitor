@@ -27,9 +27,11 @@ CONFIG_PATH = SCRIPT_DIR / "config.json"
 CURSOR_PATH = SCRIPT_DIR / ".sub_cursor"
 LOCK_PATH = SCRIPT_DIR / ".monitor.lock"
 # Canary gate handoff: main() writes "1" here when the run is healthy enough to
-# (re)publish, else "0". run.sh reads it and only then renders+publishes the
-# dashboard — so a thin/throttled run can't present stale data as fresh, and the
-# dashboard is rendered ONCE per run (by run.sh) instead of twice.
+# (re)publish, else "0". run.sh reads it (it `rm -f`s the file BEFORE launching
+# this script, so an absent file — i.e. we crashed before writing — safely reads
+# as "0"/skip) and only then renders+publishes — so a thin/throttled run can't
+# present stale data as fresh, and the dashboard is rendered ONCE per run.
+# NOTE: keep this filename in sync with `.run_ok` in run.sh.
 RUN_OK_PATH = SCRIPT_DIR / ".run_ok"
 TOPIC = "new indie and underground music releases and emerging artists"
 # Reddit throttles ~175 rapid feed pulls from one IP, so each run covers a
@@ -386,6 +388,7 @@ def main() -> int:
     lock = acquire_lock()
     if lock is None:
         logger.warning("another monitor instance is running; skipping this run")
+        _set_run_ok(False)  # don't let run.sh publish off a skipped run
         return 0
     tier = probe_tier()
     if tier != "ok":

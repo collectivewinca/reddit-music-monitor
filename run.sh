@@ -51,28 +51,41 @@ if ! mkdir "$LOCKDIR" 2>/dev/null; then
     echo "$(ts) - WARN - run already in progress (pid $holder); skipping" >> "$LOG"
     exit 0
   fi
-  echo "$(ts) - WARN - reclaiming stale run lock (holder ${holder:-?} gone)" >> "$LOG"
+  # Stale holder (PID gone). Reclaim ATOMICALLY: rm + mkdir, and bail if the
+  # mkdir loses a race to a concurrent reclaimer (closes the TOCTOU window where
+  # two runs both see the same dead holder and both proceed).
+  rm -rf "$LOCKDIR"
+  if ! mkdir "$LOCKDIR" 2>/dev/null; then
+    echo "$(ts) - WARN - lost race reclaiming stale lock; skipping" >> "$LOG"
+    exit 0
+  fi
+  echo "$(ts) - WARN - reclaimed stale run lock (holder ${holder:-?} gone)" >> "$LOG"
 fi
 echo "$$" > "$LOCKDIR/pid"
 trap 'rm -rf "$LOCKDIR"' EXIT
 
 # --- Portable timeout (no `timeout`/`gtimeout` on stock macOS) ---
-# Runs the command in the background and TERMs it after N seconds; returns the
-# command's own exit code, or 124 on timeout (matching GNU `timeout`).
+# Runs the command in the background and TERMs the whole PROCESS GROUP after N
+# seconds; returns the command's own exit code, or 124 on timeout (matching GNU
+# `timeout`). `set -m` puts the backgrounded job in its own process group so the
+# group-kill reaches grandchildren (e.g. the curl inside do_publish's subshell)
+# rather than just the wrapping subshell.
 run_with_timeout() {  # $1 = seconds; $2.. = command (may be a shell function)
   local secs="$1"; shift
+  set -m
   "$@" &
   local cmd_pid=$!
-  ( sleep "$secs"; kill -TERM "$cmd_pid" 2>/dev/null ) &
+  set +m
+  ( sleep "$secs"; kill -TERM -"$cmd_pid" 2>/dev/null ) &
   local killer=$!
   local rc=0
   wait "$cmd_pid" 2>/dev/null || rc=$?
-  if ! kill -0 "$killer" 2>/dev/null; then
-    rc=124              # killer already fired its TERM -> this was a timeout
-  else
-    kill -TERM "$killer" 2>/dev/null   # cmd finished first; cancel the killer
-  fi
-  wait "$killer" 2>/dev/null || true
+  # The killer exits 0 ONLY if it completed its sleep and fired TERM (a real
+  # timeout); if the command finished first we TERM the killer so it exits
+  # non-zero. This is race-free vs checking the reaped command's own code.
+  kill -TERM "$killer" 2>/dev/null
+  local krc=0; wait "$killer" 2>/dev/null || krc=$?
+  [[ $krc -eq 0 ]] && rc=124
   return "$rc"
 }
 

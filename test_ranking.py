@@ -63,6 +63,14 @@ def test_min_relevance_default():
     assert ranking.MIN_RELEVANCE == 0
 
 
+def test_weights_overridable_per_call():
+    # The penalty/boost are parameters (not hard globals), so tuning/tests can
+    # override them without monkeypatching module state.
+    p = _post("check out my new album")
+    assert signal_score(p, promo_penalty=10) == 40
+    assert signal_score(_post("[FRESH] X"), curated_boost=5) == 55
+
+
 if __name__ == "__main__":
     import sys
     import pytest
