@@ -319,3 +319,15 @@ MIT - Feel free to fork and adapt for your own music discovery needs.
 - **here.now** — Free static hosting for the dashboard
 - **Himalaya** — CLI email client for reports
 - **Claude Code** — Assisted development
+
+## Configuration & secrets
+
+1. Copy `.env.example` to `.env` and fill in values locally (or set them in the hosting/CI environment).
+2. Never commit `.env` files or service-account JSON keys; `.gitignore` blocks them.
+3. Required environment variables:
+   - `WEBSHARE_API_KEY`
+   - `REDDIT_CLIENT_ID`
+   - `REDDIT_CLIENT_SECRET`
+   - `REDDIT_USER_AGENT`
+
+See [SECURITY-NOTES.md](SECURITY-NOTES.md) for the 2026-10-15 secrets cleanup and keys pending rotation.
