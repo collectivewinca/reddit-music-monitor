@@ -23,3 +23,12 @@ index.html
 
 # Telegram alert chat id (local config; not a secret but env-specific)
 .telegram_chat
+
+# Secrets: never commit (see PR chore/remove-committed-secrets-20261015)
+.env
+.env.*
+!.env.example
+*serviceAccount*.json
+service_account_key.json
+.openclaw/.env
+.openclaw/identity/
